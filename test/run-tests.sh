@@ -7,49 +7,93 @@ set -eu
 
 cd $(dirname $0)/..
 
-cleanup () {
-    local exit_val=$?
-    rm -f WORD.MDV
-    exit $exit_val
+PROG=bin/words
+CONF=WORD.MDV
+TRIM=test/ignore-top-and-tail
+
+declare -a tmpfiles
+
+register-tmp () {
+    local tmpfile=$1
+    tmpfiles+=($tmpfile)
 }
-
-if [ ! -f WORD.MDV ]; then
-    cp test/WORD.MDV_template WORD.MDV
-    trap cleanup EXIT
-fi
-
-bin/words 'rem acu tetigisti' | diff -q -- - test/expected.txt
 
 # mktemp () is LSB:
 which tempfile &> /dev/null || tempfile () { mktemp "$@"; }
-TEMP=$(tempfile)
 
-run-tests () {
-    set +u
-    if [ "$TRAVIS" = "true" ]; then
-        set -u
-        TEMP2=$(tempfile)
-        bin/words < test/aeneid_bk4.txt | tail -n +19 | tee $TEMP2
-        diff -u -- - test/aeneid_bk4.txt.expected < $TEMP2 > $TEMP
-        rv=$?
-        rm -f -- $TEMP2 || true
-        return $rv
-    else
-        set -u
-        bin/words < test/aeneid_bk4.txt | tail -n +19 | \
-        diff -u -- - test/aeneid_bk4.expected > $TEMP
-    fi
+create-tmp () {
+    declare -n ref=$1
+    local TMP=$(tempfile)
+    register-tmp $TMP
+    ref=$TMP
 }
-    
-if ! ( run-tests ); then
-  rv=$?
-  if [ -s "$TEMP" ]; then
-    cat $TEMP
-  fi
-  rm -f -- $TEMP
-  echo FAIL
-  exit $rv
-fi
-rm -f -- $TEMP
 
-echo PASS
+# For belt-and-braces reasons, we try to delete all the temp files
+# here as well
+cleanup () {
+    local exit_val=$?
+    for t in ${tmpfiles[@]}; do
+        rm -f -- $t || true
+    done
+    exit $exit_val
+}
+
+trap cleanup EXIT
+
+if [ ! -f ${CONF} ]; then
+    cp test/${CONF}_template ${CONF}
+    register-tmp ${CONF}
+fi
+
+# Initial smoke test
+#
+# If this fails, we don't waste time on other tests, and just let the
+# whole thing crash.
+$PROG 'rem acu tetigisti' | diff -q -- - test/expected.txt
+
+report-result () {
+    local test_name=$1
+    local result=$2
+
+    echo $test_name .. $result
+}
+
+
+failed=0
+
+run-test () {
+    local test_name=$1
+    local test_file_dir=test/${test_name}
+    local source=${test_file_dir}/input.txt
+    local expected=${test_file_dir}/expected.txt
+
+    create-tmp TMP_DISCREPANCIES
+    create-tmp TMP_TRANSCRIPT
+    $PROG < ${source} | $TRIM > $TMP_TRANSCRIPT
+    [[ -v TRAVIS ]] && cat $TMP_TRANSCRIPT
+
+    if diff -u -- - ${expected} < $TMP_TRANSCRIPT > $TMP_DISCREPANCIES
+    then
+        report-result $test_name PASS
+    else
+        [ -s "$TMP_DISCREPANCIES" ] && cat $TMP_DISCREPANCIES >&2
+        report-result $test_name FAIL
+        failed=1
+    fi
+
+    # avoid buildup of temp files
+    rm -f -- $TMP_TRANSCRIPT $TMP_DISCREPANCIES
+}
+
+all-test-names () {
+    for name in test/[0-9][0-9]_*; do
+        basename $name
+    done
+}
+
+# Main test(s)
+for name in $(all-test-names); do
+    run-test $name
+done
+
+exit $failed
